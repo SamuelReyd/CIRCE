@@ -17,7 +17,6 @@ def get_room_neighbours(i,j, flat_length):
   return nei_ids
   
 # Rules
-
 def R_IT1(s, ns, i, j, hp):
   if s[f"room_{i}_{j}_window_state"]:
     ns[f"room_{i}_{j}_true_inside_T"] = np.random.normal(s["outside_T"], hp["noises"]["window"])
@@ -186,7 +185,6 @@ def extract_measures(state, dim_labels):
   return [state[i] for i,dim in enumerate(dim_labels) if "true" not in dim]
   
 # Main functions
-
 def transition_multi_house(state, dim_labels, hp, verbose=False):
   """
   state:

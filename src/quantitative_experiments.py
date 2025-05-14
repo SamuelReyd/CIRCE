@@ -1,3 +1,8 @@
+"""
+This file implements functions for the quantitative experiments. It creates subfolders in the ‘experiments` folder.
+When using `python src/quantitative_experiments.py`, make sure to be at the root of the project.
+"""
+
 from simulation import *
 from CIRCE import *
 from rendering import *

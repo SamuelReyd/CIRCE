@@ -1,16 +1,19 @@
+"""
+This file implements functions to render figures.
+"""
+
 from CIRCE import *
 import numpy as np, matplotlib.pyplot as plt, re
 from sklearn.tree import DecisionTreeClassifier, plot_tree
 
+# This function renders the measures in 9 rooms in one house.
 def plot_behavior(house_k, M, dim_labels, discrete_dims, hyper_parameters, timesteps={}, save=False, start_id=0,end_id=80):
   grid_step = 10
-  # _, axes = plt.subplots(hyper_parameters["flat_length"]**2+1, 1, figsize=(10,32), sharex=True)
   _, axes = plt.subplots(4, 3, figsize=(22,17), sharex=True)
   colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
   x = np.arange(start_id, end_id)
   for j in range(hyper_parameters["flat_length"]):
     for i in range(hyper_parameters["flat_length"]):
-      # ax1 = axes[j + i * hyper_parameters["flat_length"]+1]
       ax1 = axes.flatten()[j + i * hyper_parameters["flat_length"]+3]
 
       ax2 = ax1.twinx()
@@ -32,12 +35,9 @@ def plot_behavior(house_k, M, dim_labels, discrete_dims, hyper_parameters, times
       ax1.set_xticks(np.arange(start_id, end_id, grid_step))
       ax1.tick_params(axis='both', labelsize=16)
       ax1.grid(axis="x")
-      # labs = [l.get_label() for l in lns]
-      # ax2.legend(lns, labs, loc=0)
 
       ax1.set_title(f"Room ({i},{j})", fontsize=22)
 
-  # legend_ax = axes[0]
   axes[0,0].clear()
   axes[0,0].axis('off')
   axes[0,2].clear()
@@ -51,13 +51,15 @@ def plot_behavior(house_k, M, dim_labels, discrete_dims, hyper_parameters, times
   plt.tight_layout()
   if save: plt.savefig("System behavior over time.pdf", bbox_inches='tight')
   plt.show()
-  
+
+# This function renders one decision tree
 def plot_surrogate(clf, dim_labels, T, save=False, name=None, show=False):
   pred_label = ' and '.join([show_clause(*clause) for clause in T])
   plot_tree(clf, feature_names=dim_labels, class_names=[f"not({pred_label})", pred_label], filled=True)
   if save: plt.savefig(name if name is not None else "surrogate.pdf")
   if show: plt.show()
 
+# This function renders the measure for one room
 def plot_single_room(M, house_k, i, j, start_id, end_id, dims, ddims, timesteps):
   grid_step = 10
   colors = plt.rcParams['axes.prop_cycle'].by_key()['color']

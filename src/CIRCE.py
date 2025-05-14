@@ -1,26 +1,21 @@
+# Internal imports
 from simulation import *
+
+# External imports
 import numpy as np, matplotlib.pyplot as plt, re, time, joblib, json
 from tqdm.notebook import tqdm
 from sklearn.tree import DecisionTreeClassifier, plot_tree
 
-# Utils
-def balance_training_dataset(X, y, hp):
-  pos_ids = np.where(y == 1)[0]
-  neg_ids = np.where(y == 0)[0]
-  if len(pos_ids) > len(neg_ids):
-    pos_ids = np.random.choice(pos_ids, size=len(neg_ids), replace=False)
-  else:
-    neg_ids = np.random.choice(neg_ids, size=len(pos_ids), replace=False)
-  all_ids = np.concatenate([pos_ids,neg_ids])
-  np.random.shuffle(all_ids)
-  return X[all_ids], y[all_ids]
-  
+
+# Sklearn decision tree helper functions
+## Finds the id of the sibling of a node in a sklearn decision tree
 def get_sibling_id(tree, parent_id, node_id):
   if tree.tree_.children_left[parent_id] == node_id:
     return tree.tree_.children_right[parent_id]
   else:
     return tree.tree_.children_left[parent_id]
-    
+
+## Finds the ids of the right and left children of a node in a sklearn decision tree
 def get_childen_ids(tree, node_id, path):
   child_left_id = tree.tree_.children_left[node_id]
   child_right_id = tree.tree_.children_right[node_id]
@@ -31,22 +26,44 @@ def get_childen_ids(tree, node_id, path):
   else:
     return None
 
+# Short for reporting the impurity of a node
+def imp(tree, node_id):
+  return tree.tree_.impurity[node_id]
+
+# Short for reporting the probability of the consequence associated with a node
+def prob(tree, node_id):
+  return tree.tree_.value[node_id,0,1]/np.sum(tree.tree_.value[node_id])
+
+# Cause identification within the decision tree
+## A path is a BF cause if it leads to a leaf where the consequence holds while it doesn't in its sibling
 def check_BF_end(tree, node_id, sibling_id, next_node_id, next_sibling_id, hp):
   return (
       tree.tree_.impurity[node_id] < hp["min_impurity_threshold"] and tree.classes[node_id] == 1 and
       tree.tree_.impurity[sibling_id] < hp["min_impurity_threshold"] and tree.classes[sibling_id] == 0
   )
-  
+
+## A path is approximately a sufficient BF cause if it ends with a node where the consequence holds, and so it does for both its children
 def check_CBF_end(tree, node_id, sibling_id, next_node_id, next_sibling_id, hp):
   return (
       tree.tree_.impurity[node_id] < hp["min_impurity_threshold"] and tree.classes[node_id] == 1 and
       tree.tree_.impurity[next_node_id] < hp["min_impurity_threshold"] and tree.classes[next_node_id] == 1 and
       (tree.classes[next_sibling_id] == 1 or tree.tree_.impurity[next_sibling_id] > hp["max_impurity_threshold"])
   )
-  
+
+# Additional rendering functions
 def show_clause(dimension, comparator, threshold):
   return " ".join([dimension, comparator, f"{threshold:.2f}"])
 
+def show_predicate(P):
+  return " and ".join([show_clause(*clause) for clause in P])
+
+def plot_surrogate(clf, dim_labels, T, save=False, name=None, show=False):
+  pred_label = ' and '.join([show_clause(*clause) for clause in T])
+  plot_tree(clf, feature_names=dim_labels, class_names=[f"not({pred_label})", pred_label], filled=True)
+  if save: plt.savefig(name if name is not None else "surrogate.pdf")
+  if show: plt.show()
+
+# Helper functions for predicate evaluation
 def evaluate_clause(s, dim_labels, dimension, comparator, threshold):
   if comparator == ">":
     return s[dim_labels.index(dimension)] > threshold
@@ -58,67 +75,12 @@ def evaluate_clause(s, dim_labels, dimension, comparator, threshold):
 def evaluate_predicate(s, P, dim_labels):
   return np.all([evaluate_clause(s, dim_labels, *clause) for clause in P])
 
-def show_predicate(P):
-  return " and ".join([show_clause(*clause) for clause in P])
-  
-def add_perturbation_with_balance(x, y, s, X_train, y_train, weight, pos_w, neg_w, half_w, hp):
-  if y and pos_w <= half_w:
-    X_train.append(x)
-    y_train.append(y)
-    pos_w += weight(x, s)
-  elif (not y) and neg_w <= half_w:
-    X_train.append(x)
-    y_train.append(y)
-    neg_w += weight(x, s)
-  return X_train, y_train, pos_w, neg_w
-  
-def remove_perturbation_for_weight_balance(X_train, y_train, weights, hp):
-  W = weights.sum()
-  filter = np.ones_like(y_train)
-  while weights[np.logical_and(y_train == 1,filter)].sum() / W > .50:
-    del_id = np.random.choice(np.where(y_train == 1)[0])
-    filter[del_id] = 0
-  while weights[np.logical_and(y_train == 0,filter)].sum() / W > .50:
-    del_id = np.random.choice(np.where(y_train == 0)[0])
-    filter[del_id] = 0
-  return X_train[~filter], y_train[~filter], weights[~filter]
-  
-def get_distr(n,k):
-  return np.abs(-2/n*np.arange(n+1)+1)**k/sum(np.abs(-2/n*np.arange(n+1)+1)**k)
-  
-def perturbate(s, S, hp):
-  while True:
-    random_obs = S[np.random.randint(len(S))]
-    # nb_perturb = np.random.randint(len(s))
-    p = get_distr(s.size-1, hp["perturbation_distribution"])
-    nb_perturb = np.random.choice(np.arange(s.size), p=p)
-    perturb_dims = np.random.choice(np.arange(len(s)), size=nb_perturb, replace=False)
-    perturbation = s.copy()
-
-    perturbation[perturb_dims] = random_obs[perturb_dims]
-
-    if np.max(np.abs(s - perturbation)) > hp["perturbation_min_eps"]:
-      break
-  return perturbation
-  
-def evaluate_next_state(f, x, dim_labels, T, hp):
-  state, full_dim_labels = infer_true_inside_T(x, dim_labels)
-  next_state = f(state, full_dim_labels, hp)
-  return evaluate_predicate(extract_measures(next_state, full_dim_labels), T, dim_labels)
-  
-def imp(tree, node_id):
-  return tree.tree_.impurity[node_id]
-
-def prob(tree, node_id):
-  return tree.tree_.value[node_id,0,1]/np.sum(tree.tree_.value[node_id])
-  
-# HP
+# Distance functions
 def L2_distance(s, X): return np.linalg.norm(s - X, axis=1)
-
 def L1_distance(s, X): return np.sum(np.abs(s-X), axis=1)
-
 def L0_distance(s, X): return np.sum(np.abs(s-X) > 1e-5, axis=1)
 
+# Kernel functions
 def inverse_kernel(d): return 1/(d+1e-5)
 def squared_inverse_kernel(d): return 1/(d**2+1e-5)
 def inverse_sqrt_kernel(d): return 1/(np.sqrt(d)+1e-5)
@@ -134,24 +96,64 @@ kernels = {"inverse": inverse_kernel, "squared_inverse": squared_inverse_kernel,
            "linear":linear_kernel}
            
            
-# Algorithm
-def CIRCE(T, t0, S, f, hp, measure_labels, verbose=1, seed=42, save=False):
-  np.random.seed(seed)
-  t_init = time.perf_counter()
-  ps = S[t0-1]
-  sample_interventions = intervention_samplings[hp["balance"]]
-  X_train, y_train, N = sample_interventions(S, ps, f, T, measure_labels, hp)
-  t_sample = time.perf_counter() - t_init
+"""
+Algorithm
+The main algorithm is implemented in the CIRCE function. There are 3 steps: sampling a dataset of perturbations of the current state, training a surrogate decision tree, and identifying the cause from the tree.
+"""
 
-  tree = train_tree(X_train, y_train, ps, hp)
-  t_train = time.perf_counter() - t_init - t_sample
+# First part: sampling the dataset of perturbations
 
-  C_BF, C_SBF = get_causes(tree, ps, measure_labels, hp, verbose=verbose)
-  t_generate = time.perf_counter() - t_init - t_sample - t_train
+## Helper function that handles the addition of a perturbation to the train dataset, such that there are as many positive and negative samples in the dataset
+def add_perturbation_with_balance(x, y, s, X_train, y_train, weight, pos_w, neg_w, half_w, hp):
+  if y and pos_w <= half_w:
+    X_train.append(x)
+    y_train.append(y)
+    pos_w += weight(x, s)
+  elif (not y) and neg_w <= half_w:
+    X_train.append(x)
+    y_train.append(y)
+    neg_w += weight(x, s)
+  return X_train, y_train, pos_w, neg_w
 
-  if verbose: plot_surrogate(tree, measure_labels, T, save=True)
-  return tree, C_BF, C_SBF, (t_sample, t_train, t_generate, N)
-  
+## Helper function that handles the removal of a perturbation from the train dataset, such that the positive weights are balanced with the negative weights
+## /!\ working functions that has not been tested and is not included in the results of the paper
+def remove_perturbation_for_weight_balance(X_train, y_train, weights, hp):
+  W = weights.sum()
+  filter = np.ones_like(y_train)
+  while weights[np.logical_and(y_train == 1,filter)].sum() / W > .50:
+    del_id = np.random.choice(np.where(y_train == 1)[0])
+    filter[del_id] = 0
+  while weights[np.logical_and(y_train == 0,filter)].sum() / W > .50:
+    del_id = np.random.choice(np.where(y_train == 0)[0])
+    filter[del_id] = 0
+  return X_train[~filter], y_train[~filter], weights[~filter]
+
+## Helper function for weighting samples
+def get_distr(n,k):
+  return np.abs(-2/n*np.arange(n+1)+1)**k/sum(np.abs(-2/n*np.arange(n+1)+1)**k)
+
+## This function creates a perturbations x of the current state s
+def perturbate(s, S, hp):
+  while True:
+    random_obs = S[np.random.randint(len(S))]
+    p = get_distr(s.size-1, hp["perturbation_distribution"])
+    nb_perturb = np.random.choice(np.arange(s.size), p=p)
+    perturb_dims = np.random.choice(np.arange(len(s)), size=nb_perturb, replace=False)
+    perturbation = s.copy()
+
+    perturbation[perturb_dims] = random_obs[perturb_dims]
+
+    if np.max(np.abs(s - perturbation)) > hp["perturbation_min_eps"]:
+      break
+  return perturbation
+
+## This function is used to label a perturbation x
+def evaluate_next_state(f, x, dim_labels, T, hp):
+  state, full_dim_labels = infer_true_inside_T(x, dim_labels)
+  next_state = f(state, full_dim_labels, hp)
+  return evaluate_predicate(extract_measures(next_state, full_dim_labels), T, dim_labels)
+
+## This function creates a perturbation and adds it to the training dataset with no balance requirement
 def sample_interventions_no_balance(S, s, f, T, dim_labels, hp, seed=None):
   if seed is not None: np.random.seed(seed)
   X_train = []
@@ -163,6 +165,7 @@ def sample_interventions_no_balance(S, s, f, T, dim_labels, hp, seed=None):
     y_train.append(evaluate_next_state(f, x, dim_labels, T, hp))
   return np.array(X_train), np.array(y_train), hp["n_sample"]
 
+## This function creates a perturbation, and adds it to the training dataset. It constrains the dataset to have as many positive and negative samples.
 def sample_interventions_sample_balance(S, s, f, T, dim_labels, hp, seed=None):
   if seed is not None: np.random.seed(seed)
   X_train = []
@@ -177,6 +180,8 @@ def sample_interventions_sample_balance(S, s, f, T, dim_labels, hp, seed=None):
     N += 1
   return np.array(X_train), np.array(y_train), N
 
+## This function creates a perturbation, and adds it to the training dataset. It constrains the dataset to have as much positive and negative weight.
+## /!\ working functions that has not been tested and is not included in the results of the paper
 def sample_interventions_weight_balance(S, s, f, T, dim_labels, hp, seed=None):
   if seed is not None: np.random.seed(seed)
   X_train = []
@@ -209,6 +214,9 @@ intervention_samplings = {
     "weight": sample_interventions_weight_balance,
 }
 
+# Second part: training the decision tree with the train dataset
+
+## This functions trains the decision tree with the sklearn library
 def train_tree(X, y, s, hp, seed=None):
   if seed is not None: np.random.seed(seed)
   d = distances[hp["distance"]](s, X)
@@ -224,7 +232,10 @@ def train_tree(X, y, s, hp, seed=None):
   clf.fit(X, y, sample_weight=similarities)
 
   return clf
-  
+
+# Third part: identify the cause with the trained decision tree
+
+## This function search inside the decision tree to identify the cause
 def get_causes(tree, s, measure_labels, hp, verbose=0):
   path = np.where(tree.tree_.decision_path(s.reshape(1,-1).astype('float32')).toarray().reshape(-1,1))[0]
   if len(path) == 1: return [], []
@@ -252,9 +263,20 @@ def get_causes(tree, s, measure_labels, hp, verbose=0):
       return BF, CBF
     CBF.append((measure_labels[tree.tree_.feature[node_id]], comparator, tree.tree_.threshold[node_id]))
     
-    
-def plot_surrogate(clf, dim_labels, T, save=False, name=None, show=False):
-  pred_label = ' and '.join([show_clause(*clause) for clause in T])
-  plot_tree(clf, feature_names=dim_labels, class_names=[f"not({pred_label})", pred_label], filled=True)
-  if save: plt.savefig(name if name is not None else "surrogate.pdf")
-  if show: plt.show()
+# Main algorithm
+def CIRCE(T, t0, S, f, hp, measure_labels, verbose=1, seed=42, save=False):
+  np.random.seed(seed)
+  t_init = time.perf_counter()
+  ps = S[t0-1]
+  sample_interventions = intervention_samplings[hp["balance"]]
+  X_train, y_train, N = sample_interventions(S, ps, f, T, measure_labels, hp)
+  t_sample = time.perf_counter() - t_init
+
+  tree = train_tree(X_train, y_train, ps, hp)
+  t_train = time.perf_counter() - t_init - t_sample
+
+  C_BF, C_SBF = get_causes(tree, ps, measure_labels, hp, verbose=verbose)
+  t_generate = time.perf_counter() - t_init - t_sample - t_train
+
+  if verbose: plot_surrogate(tree, measure_labels, T, save=True)
+  return tree, C_BF, C_SBF, (t_sample, t_train, t_generate, N)
